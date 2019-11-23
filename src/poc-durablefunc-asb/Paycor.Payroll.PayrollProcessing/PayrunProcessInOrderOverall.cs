@@ -10,11 +10,10 @@ using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using StackExchange.Redis;
-using static Paycor.Payroll.PayrollProcessing.PayrunProcessing;
 
 namespace Paycor.Payroll.PayrollProcessing
 {
-    public partial class PayrunProcessingWithSubOrchestration
+    public partial class PayrunProcessInOrderOverall
     {
         private readonly ILogger _log;
         private readonly ISettings _settings;
@@ -33,15 +32,15 @@ namespace Paycor.Payroll.PayrollProcessing
         const string ProcessPayrunInOrder = nameof(ProcessPayrunInOrder);
         const string PayrunProcessedInOrder = nameof(PayrunProcessedInOrder);
 
-        public PayrunProcessingWithSubOrchestration(ILogger<PayrunProcessingWithSubOrchestration> log, ISettings settings, IDatabase database)
+        public PayrunProcessInOrderOverall(ILogger<PayrunProcessInOrderOverall> log, ISettings settings, IDatabase database)
         {
             _log = log;
             _settings = settings;
             _database = database;
         }
 
-        [FunctionName(nameof(PayrunProcessingInOrder_HttpStart))]
-        public async Task<HttpResponseMessage> PayrunProcessingInOrder_HttpStart(
+        [FunctionName(nameof(PayrunProcessInOrderOverall_HttpStart))]
+        public async Task<HttpResponseMessage> PayrunProcessInOrderOverall_HttpStart(
             [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")] HttpRequestMessage req,
             [DurableClient] IDurableClient starter,
             ILogger log)
@@ -62,12 +61,12 @@ namespace Paycor.Payroll.PayrollProcessing
         {
             var request = context.GetInput<Request>();
 
-            await context.CallActivityAsync(nameof(PayrunProcessingWithSubOrchestration_SendOrderedCommand), new Tuple<string, string, Request>(ProcessPayrunInOrder, context.InstanceId, request));
+            await context.CallActivityAsync(nameof(PayrunProcessInOrderOverall_SendOrderedCommand), new Tuple<string, string, Request>(ProcessPayrunInOrder, context.InstanceId, request));
             await context.WaitForExternalEvent(PayrunProcessedInOrder);
         }
 
-        [FunctionName(nameof(PayrunProcessingWithSubOrchestration_SendOrderedCommand))]
-        public async Task PayrunProcessingWithSubOrchestration_SendOrderedCommand([ActivityTrigger] Tuple<string, string, Request> input)
+        [FunctionName(nameof(PayrunProcessInOrderOverall_SendOrderedCommand))]
+        public async Task PayrunProcessInOrderOverall_SendOrderedCommand([ActivityTrigger] Tuple<string, string, Request> input)
         {
             var queueName = input.Item1;
             var instanceId = input.Item2;
@@ -81,8 +80,8 @@ namespace Paycor.Payroll.PayrollProcessing
             return;
         }
 
-        [FunctionName(nameof(PayrunProcessingWithSubOrchestration_HandleProcessPayrunInOrder))]
-        public async Task PayrunProcessingWithSubOrchestration_HandleProcessPayrunInOrder(
+        [FunctionName(nameof(PayrunProcessInOrderOverall_HandleProcessPayrunInOrder))]
+        public async Task PayrunProcessInOrderOverall_HandleProcessPayrunInOrder(
             [ServiceBusTrigger(ProcessPayrunInOrder, Connection = "ServiceBusConnectionString", IsSessionsEnabled = true)] Message message, 
             IMessageSession messageSession,
             [DurableClient] IDurableOrchestrationClient client)
@@ -92,26 +91,26 @@ namespace Paycor.Payroll.PayrollProcessing
             var payrunId = JsonConvert.DeserializeObject<long>(Encoding.UTF8.GetString(message.Body));
             var request = new Request { ClientId = clientId, PayrunId = payrunId };
 
-            PayrunProcessingWithSubOrchestration_HandlePostPayrun(instanceId, request);
-            PayrunProcessingWithSubOrchestration_HandleProcessCaps(instanceId, request);
-            PayrunProcessingWithSubOrchestration_HandleDistributePayrun(instanceId, request);
+            PayrunProcessInOrderOverall_HandlePostPayrun(instanceId, request);
+            PayrunProcessInOrderOverall_HandleProcessCaps(instanceId, request);
+            PayrunProcessInOrderOverall_HandleDistributePayrun(instanceId, request);
 
             await client.RaiseEventAsync(instanceId, PayrunProcessedInOrder, request);
         }
 
-        public void PayrunProcessingWithSubOrchestration_HandlePostPayrun(string instanceId, Request request)
+        public void PayrunProcessInOrderOverall_HandlePostPayrun(string instanceId, Request request)
         {
             Thread.Sleep(TimeSpan.FromSeconds(5));
             _log.LogWarning($"Posting payrun for instance:  {instanceId}, client:  {request.ClientId},  payrun:  {request.PayrunId}.");
         }
 
-        public void PayrunProcessingWithSubOrchestration_HandleProcessCaps(string instanceId, Request request)
+        public void PayrunProcessInOrderOverall_HandleProcessCaps(string instanceId, Request request)
         {
             Thread.Sleep(TimeSpan.FromSeconds(5));
             _log.LogWarning($"Processing caps for instance:  {instanceId}, client:  {request.ClientId},  payrun:  {request.PayrunId}.");
         }
 
-        public void PayrunProcessingWithSubOrchestration_HandleDistributePayrun(string instanceId, Request request)
+        public void PayrunProcessInOrderOverall_HandleDistributePayrun(string instanceId, Request request)
         {
             Thread.Sleep(TimeSpan.FromSeconds(5));
             _log.LogWarning($"Distributing payrun for instance:  {instanceId}, client:  {request.ClientId},  payrun:  {request.PayrunId}.");
