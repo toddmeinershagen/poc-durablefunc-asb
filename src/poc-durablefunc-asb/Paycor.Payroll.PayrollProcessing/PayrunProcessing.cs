@@ -8,26 +8,47 @@ using Microsoft.Azure.WebJobs.Extensions.DurableTask;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using StackExchange.Redis;
 
 namespace Paycor.Payroll.PayrollProcessing
 {
-    public class PayrunProcessing
+    public partial class PayrunProcessing
     {
+        private readonly ILogger _log;
         private readonly ISettings _settings;
-        private Random _random = new Random(Guid.NewGuid().GetHashCode());
+        private readonly IDatabase _database;
+        private readonly Random _random = new Random(Guid.NewGuid().GetHashCode());
 
-        const string PostPayrun = "PostPayrun";
-        const string PayrunPosted = "PayrunPosted";
+        const string PostPayrun = nameof(PostPayrun);
+        const string PayrunPosted = nameof(PayrunPosted);
 
-        const string ProcessCaps = "ProcessCaps";
-        const string CapsProcessed = "CapsProcessed";
+        const string ProcessCaps = nameof(ProcessCaps);
+        const string CapsProcessed = nameof(CapsProcessed);
 
-        const string DistributePayrun = "DistributePayrun";        
-        const string PayrunDistributed = "PayrunDistributed";
+        const string DistributePayrun = nameof(DistributePayrun);        
+        const string PayrunDistributed = nameof(PayrunDistributed);
 
-        public PayrunProcessing(ISettings settings)
+        public PayrunProcessing(ILogger<PayrunProcessing> log, ISettings settings, IDatabase database)
         {
+            _log = log;
             _settings = settings;
+            _database = database;
+        }
+
+        [FunctionName(nameof(PayrunProcessing_HttpStart))]
+        public async Task<HttpResponseMessage> PayrunProcessing_HttpStart(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")]HttpRequestMessage req,
+            [DurableClient]IDurableClient starter,
+            ILogger log)
+        {
+            var clientId = (_random.Next(1, 100) % 5 + 1).ToString();
+            var payrunId = _database.StringIncrement($"client::{clientId}");
+            var request = new Request { ClientId = clientId, PayrunId = payrunId };
+
+            string instanceId = await starter.StartNewAsync(nameof(PayrunProcessing), request);
+            log.LogWarning($"Started orchestration for instance: {instanceId}, client:  {clientId}, payrun:  {payrunId}.");
+
+            return starter.CreateCheckStatusResponse(req, instanceId);
         }
 
         [FunctionName(nameof(PayrunProcessing))]
@@ -35,7 +56,7 @@ namespace Paycor.Payroll.PayrollProcessing
             [OrchestrationTrigger] IDurableOrchestrationContext context)
         {
             var request = context.GetInput<Request>();
-            
+
             await context.CallActivityAsync(nameof(PayrunProcessing_SendOrderedCommand), new Tuple<string, string, Request>(PostPayrun, context.InstanceId, request));
             var response1 = await context.WaitForExternalEvent<Request>(PayrunPosted);
             
@@ -48,14 +69,8 @@ namespace Paycor.Payroll.PayrollProcessing
             return;
         }
 
-        public class Request
-        {
-            public string ClientId { get; set; }
-            public long PayrunId { get; set; }
-        }
-
         [FunctionName(nameof(PayrunProcessing_SendOrderedCommand))]
-        public async Task PayrunProcessing_SendOrderedCommand([ActivityTrigger] Tuple<string, string, Request> input, ILogger log)
+        public async Task PayrunProcessing_SendOrderedCommand([ActivityTrigger] Tuple<string, string, Request> input)
         {
             var queueName = input.Item1;
             var instanceId = input.Item2;
@@ -66,7 +81,6 @@ namespace Paycor.Payroll.PayrollProcessing
             await client.SendAsync(new Message { CorrelationId = instanceId, SessionId = request.ClientId, Body = Encoding.UTF8.GetBytes(body) });
             await client.CloseAsync();
 
-            //log.LogWarning($"Sending ordered command:  {queueName} for instance:  {instanceId}, client:  {request.ClientId}, payrun:  {request.PayrunId}.");
             return;
         }
 
@@ -74,19 +88,17 @@ namespace Paycor.Payroll.PayrollProcessing
         public async Task PayrunProcessing_HandlePostPayrun(
             [ServiceBusTrigger(PostPayrun, Connection = "ServiceBusConnectionString", IsSessionsEnabled = true)] Message message, 
             IMessageSession messageSession,
-            [DurableClient] IDurableOrchestrationClient client,
-            ILogger log)
+            [DurableClient] IDurableOrchestrationClient client)
         {
             var instanceId = message.CorrelationId;
             var clientId = messageSession.SessionId;
             var payrunId = JsonConvert.DeserializeObject<long>(Encoding.UTF8.GetString(message.Body));
-
-            log.LogWarning($"Posting payrun for instance:  {instanceId}, client:  {clientId},  payrun:  {payrunId}.");
-
+            
             try
             {
-                var response = new Request { ClientId = clientId, PayrunId = payrunId };
-                await client.RaiseEventAsync(instanceId, PayrunPosted, response);
+                var request = new Request { ClientId = clientId, PayrunId = payrunId };
+                _log.LogWarning($"Posting payrun for instance:  {instanceId}, client:  {request.ClientId},  payrun:  {request.PayrunId}.");
+                await client.RaiseEventAsync(instanceId, PayrunPosted, request);
             } catch
             {
                 //Instance does not exist anymore
@@ -104,12 +116,11 @@ namespace Paycor.Payroll.PayrollProcessing
             var clientId = messageSession.SessionId;
             var payrunId = JsonConvert.DeserializeObject<long>(Encoding.UTF8.GetString(message.Body));
 
-            log.LogWarning($"Processing caps for instance:  {instanceId}, client:  {clientId},  payrun:  {payrunId}.");
-
             try
             {
-                var response = new Request { ClientId = clientId, PayrunId = payrunId };
-                await client.RaiseEventAsync(instanceId, CapsProcessed, response);
+                var request = new Request { ClientId = clientId, PayrunId = payrunId };
+                _log.LogWarning($"Processing caps for instance:  {instanceId}, client:  {request.ClientId},  payrun:  {request.PayrunId}.");
+                await client.RaiseEventAsync(instanceId, CapsProcessed, request);
             }
             catch
             {
@@ -128,34 +139,16 @@ namespace Paycor.Payroll.PayrollProcessing
             var clientId = messageSession.SessionId;
             var payrunId = JsonConvert.DeserializeObject<long>(Encoding.UTF8.GetString(message.Body));
 
-            log.LogWarning($"Distributing payrun for instance:  {instanceId}, client:  {clientId},  payrun:  {payrunId}.");
-
             try
             {
-                var response = new Request { ClientId = clientId, PayrunId = payrunId };
-                await client.RaiseEventAsync(instanceId, PayrunDistributed, response);
+                var request = new Request { ClientId = clientId, PayrunId = payrunId };
+                _log.LogWarning($"Distributing payrun for instance:  {instanceId}, client:  {request.ClientId},  payrun:  {request.PayrunId}.");
+                await client.RaiseEventAsync(instanceId, PayrunDistributed, request);
             }
             catch
             {
                 //Instance does not exist anymore
             }
-        }
-
-        [FunctionName(nameof(PayrunProcessing_HttpStart))]
-        public async Task<HttpResponseMessage> PayrunProcessing_HttpStart(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")]HttpRequestMessage req,
-            [DurableClient]IDurableClient starter,
-            ILogger log)
-        {
-            //var clientId = (_random.Next(1, 100) % 5 + 1).ToString();
-            var clientId = 1.ToString();
-            var payrunId = DateTime.Now.Ticks;
-            var request = new Request { ClientId = clientId, PayrunId = payrunId };
-
-            string instanceId = await starter.StartNewAsync(nameof(PayrunProcessing), request);
-            log.LogWarning($"Started orchestration for instance: {instanceId}, client:  {clientId}, payrun:  {payrunId}.");
-
-            return starter.CreateCheckStatusResponse(req, instanceId);
         }
     }
 }
